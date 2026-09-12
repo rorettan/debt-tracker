@@ -12,6 +12,7 @@ import {
   getStoredRateSchedules,
   getStoredSnapshots,
   subscribeToDataChanges,
+  fetchSupabaseData,
   saveFacility as apiSaveFacility,
   updateFacility as apiUpdateFacility,
   deleteFacility as apiDeleteFacility,
@@ -29,9 +30,9 @@ import {
 } from '@/lib/calculations';
 
 export function useDebtData(selectedDate?: string) {
-  const [facilities, setFacilities] = useState<Facility[]>([]);
-  const [rateSchedules, setRateSchedules] = useState<RateSchedule[]>([]);
-  const [snapshots, setSnapshots] = useState<BalanceSnapshot[]>([]);
+  const [facilities, setFacilities] = useState<Facility[]>(getStoredFacilities());
+  const [rateSchedules, setRateSchedules] = useState<RateSchedule[]>(getStoredRateSchedules());
+  const [snapshots, setSnapshots] = useState<BalanceSnapshot[]>(getStoredSnapshots());
   const [isLoaded, setIsLoaded] = useState(false);
 
   const today = useMemo(() => new Date().toISOString().split('T')[0], []);
@@ -45,7 +46,14 @@ export function useDebtData(selectedDate?: string) {
   }, []);
 
   useEffect(() => {
-    refreshData();
+    // Initial fetch from Supabase
+    fetchSupabaseData().then((data) => {
+      setFacilities(data.facilities);
+      setRateSchedules(data.rateSchedules);
+      setSnapshots(data.snapshots);
+      setIsLoaded(true);
+    });
+
     const unsubscribe = subscribeToDataChanges(refreshData);
     return unsubscribe;
   }, [refreshData]);
@@ -101,6 +109,7 @@ export function useDebtData(selectedDate?: string) {
       deleteSnapshot: apiDeleteSnapshot,
       clearAllData: apiClearAll,
       loadSampleCommercialData: apiLoadSample,
+      refreshData: fetchSupabaseData,
     },
   };
 }
