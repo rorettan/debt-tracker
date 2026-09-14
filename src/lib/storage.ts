@@ -1,19 +1,15 @@
 import { supabase } from '@/integrations/supabase/client';
 import { BalanceSnapshot, Facility, RateSchedule } from '@/types/debt';
 
-const CHANGE_EVENT = 'debt_tracker_supabase_changed';
-const LEGACY_STORAGE_KEYS = {
-  FACILITIES: 'debt_tracker_facilities_v1',
-  RATE_SCHEDULES: 'debt_tracker_rates_v1',
-  SNAPSHOTS: 'debt_tracker_snapshots_v1',
-};
+const CHANGE_EVENT = 'debt_tracker_supabase_data_sync';
 
-// In-memory cache populated from Supabase
+// Live in-memory mirror kept strictly in sync with Supabase PostgreSQL
 let cachedFacilities: Facility[] = [];
 let cachedRateSchedules: RateSchedule[] = [];
 let cachedSnapshots: BalanceSnapshot[] = [];
 let lastSyncError: string | null = null;
 let isSyncing = false;
+let isRealtimeSubscribed = false;
 
 function emitChange() {
   if (typeof window !== 'undefined') {
@@ -38,79 +34,7 @@ export function getIsSyncing(): boolean {
 }
 
 /**
- * Automatically migrate any legacy localStorage data from before the Supabase upgrade
- */
-async function migrateLegacyLocalData(): Promise<void> {
-  if (typeof window === 'undefined') return;
-
-  try {
-    const rawFac = localStorage.getItem(LEGACY_STORAGE_KEYS.FACILITIES);
-    const rawRates = localStorage.getItem(LEGACY_STORAGE_KEYS.RATE_SCHEDULES);
-    const rawSnaps = localStorage.getItem(LEGACY_STORAGE_KEYS.SNAPSHOTS);
-
-    if (!rawFac) return;
-
-    const legacyFacilities: any[] = JSON.parse(rawFac);
-    if (!Array.isArray(legacyFacilities) || legacyFacilities.length === 0) return;
-
-    console.log('[Supabase Migration] Found legacy local facilities to migrate:', legacyFacilities.length);
-
-    const legacyRates: any[] = rawRates ? JSON.parse(rawRates) : [];
-    const legacySnaps: any[] = rawSnaps ? JSON.parse(rawSnaps) : [];
-
-    // Map old string IDs to newly generated UUIDs in Supabase
-    for (const oldFac of legacyFacilities) {
-      const { data: newFac, error: facErr } = await supabase
-        .from('facilities')
-        .insert({
-          bank_name: oldFac.bank_name,
-          facility_name: oldFac.facility_name,
-          facility_type: oldFac.facility_type,
-          sanction_limit: oldFac.sanction_limit,
-          status: oldFac.status || 'ACTIVE',
-        })
-        .select()
-        .single();
-
-      if (facErr || !newFac) {
-        console.error('[Supabase Migration] Error migrating facility:', facErr?.message);
-        continue;
-      }
-
-      // Migrate corresponding rates
-      const oldRatesForFac = legacyRates.filter((r) => r.facility_id === oldFac.id);
-      for (const r of oldRatesForFac) {
-        await supabase.from('rate_schedules').insert({
-          facility_id: newFac.id,
-          annual_rate_pct: r.annual_rate_pct,
-          effective_date: r.effective_date,
-        });
-      }
-
-      // Migrate corresponding snapshots
-      const oldSnapsForFac = legacySnaps.filter((s) => s.facility_id === oldFac.id);
-      for (const s of oldSnapsForFac) {
-        await supabase.from('balance_snapshots').insert({
-          facility_id: newFac.id,
-          value_date: s.value_date,
-          balance_amount: s.balance_amount,
-          notes: s.notes || null,
-        });
-      }
-    }
-
-    // Clear legacy keys once successfully migrated to prevent duplicates
-    localStorage.removeItem(LEGACY_STORAGE_KEYS.FACILITIES);
-    localStorage.removeItem(LEGACY_STORAGE_KEYS.RATE_SCHEDULES);
-    localStorage.removeItem(LEGACY_STORAGE_KEYS.SNAPSHOTS);
-    console.log('[Supabase Migration] Legacy data migrated successfully and cleaned up.');
-  } catch (err) {
-    console.warn('[Supabase Migration] Error during legacy data check:', err);
-  }
-}
-
-/**
- * Fetch fresh data directly from Supabase tables
+ * Fetch all facilities, rate schedules, and balance snapshots directly from Supabase PostgreSQL
  */
 export async function fetchSupabaseData(): Promise<{
   facilities: Facility[];
@@ -122,18 +46,24 @@ export async function fetchSupabaseData(): Promise<{
   lastSyncError = null;
 
   try {
-    // Check if we need to migrate local phone data first
-    await migrateLegacyLocalData();
-
     const [facRes, ratesRes, snapRes] = await Promise.all([
-      supabase.from('facilities').select('*').order('created_at', { ascending: false }),
-      supabase.from('rate_schedules').select('*').order('effective_date', { ascending: false }),
-      supabase.from('balance_snapshots').select('*').order('value_date', { ascending: false }),
+      supabase
+        .from('facilities')
+        .select('*')
+        .order('created_at', { ascending: false }),
+      supabase
+        .from('rate_schedules')
+        .select('*')
+        .order('effective_date', { ascending: false }),
+      supabase
+        .from('balance_snapshots')
+        .select('*')
+        .order('value_date', { ascending: false }),
     ]);
 
     if (facRes.error) {
+      console.error('[Supabase Error] Facilities query failed:', facRes.error.message);
       lastSyncError = `Facilities: ${facRes.error.message}`;
-      console.error('Error fetching facilities from Supabase:', facRes.error.message);
     } else if (facRes.data) {
       cachedFacilities = facRes.data.map((f: any) => ({
         id: f.id,
@@ -147,8 +77,8 @@ export async function fetchSupabaseData(): Promise<{
     }
 
     if (ratesRes.error) {
-      lastSyncError = `Rates: ${ratesRes.error.message}`;
-      console.error('Error fetching rate_schedules from Supabase:', ratesRes.error.message);
+      console.error('[Supabase Error] Rate schedules query failed:', ratesRes.error.message);
+      lastSyncError = `Rate schedules: ${ratesRes.error.message}`;
     } else if (ratesRes.data) {
       cachedRateSchedules = ratesRes.data.map((r: any) => ({
         id: r.id,
@@ -159,8 +89,8 @@ export async function fetchSupabaseData(): Promise<{
     }
 
     if (snapRes.error) {
+      console.error('[Supabase Error] Balance snapshots query failed:', snapRes.error.message);
       lastSyncError = `Snapshots: ${snapRes.error.message}`;
-      console.error('Error fetching balance_snapshots from Supabase:', snapRes.error.message);
     } else if (snapRes.data) {
       cachedSnapshots = snapRes.data.map((s: any) => ({
         id: s.id,
@@ -174,8 +104,8 @@ export async function fetchSupabaseData(): Promise<{
 
     emitChange();
   } catch (err: any) {
-    lastSyncError = err?.message || 'Network error connecting to Supabase';
-    console.error('Unexpected error during Supabase sync:', err);
+    lastSyncError = err?.message || 'Network error reaching Supabase';
+    console.error('[Supabase Error] Failed to sync data:', err);
   } finally {
     isSyncing = false;
   }
@@ -188,32 +118,53 @@ export async function fetchSupabaseData(): Promise<{
   };
 }
 
-// Subscribe to Supabase Realtime channel for live multi-tab & multi-device sync
-if (typeof window !== 'undefined') {
-  const channel = supabase
-    .channel('debt_tracker_realtime')
-    .on(
-      'postgres_changes',
-      { event: '*', schema: 'public', table: 'facilities' },
-      () => fetchSupabaseData()
-    )
-    .on(
-      'postgres_changes',
-      { event: '*', schema: 'public', table: 'rate_schedules' },
-      () => fetchSupabaseData()
-    )
-    .on(
-      'postgres_changes',
-      { event: '*', schema: 'public', table: 'balance_snapshots' },
-      () => fetchSupabaseData()
-    )
-    .subscribe();
+/**
+ * Initialize live Supabase Realtime channel subscription
+ */
+function initSupabaseRealtime() {
+  if (typeof window === 'undefined' || isRealtimeSubscribed) return;
 
-  // Initial fetch
+  try {
+    supabase
+      .channel('public_postgres_changes')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'facilities' },
+        () => {
+          fetchSupabaseData();
+        }
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'rate_schedules' },
+        () => {
+          fetchSupabaseData();
+        }
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'balance_snapshots' },
+        () => {
+          fetchSupabaseData();
+        }
+      )
+      .subscribe((status) => {
+        if (status === 'SUBSCRIBED') {
+          isRealtimeSubscribed = true;
+        }
+      });
+  } catch (err) {
+    console.warn('[Supabase Realtime] Setup error:', err);
+  }
+}
+
+// Kick off initial fetch and realtime subscription
+if (typeof window !== 'undefined') {
+  initSupabaseRealtime();
   fetchSupabaseData();
 }
 
-// Synchronous getters from the active Supabase memory cache
+// Active memory mirror accessors
 export function getStoredFacilities(): Facility[] {
   return cachedFacilities;
 }
@@ -226,7 +177,9 @@ export function getStoredSnapshots(): BalanceSnapshot[] {
   return cachedSnapshots;
 }
 
-// Facility Operations with Supabase
+/**
+ * Save a new facility directly to Supabase PostgreSQL
+ */
 export async function saveFacility(
   facility: Omit<Facility, 'id' | 'created_at'>,
   initialApr?: number
@@ -245,7 +198,7 @@ export async function saveFacility(
       .single();
 
     if (error) {
-      console.error('Failed to create facility in Supabase:', error.message);
+      console.error('[Supabase Insert Error] facilities:', error.message);
       return { data: null, error: error.message };
     }
 
@@ -259,26 +212,31 @@ export async function saveFacility(
       created_at: insertedFacility.created_at,
     };
 
-    cachedFacilities = [newFacility, ...cachedFacilities];
-
+    // If initial APR provided, save to rate_schedules table
     if (initialApr && initialApr > 0) {
       const today = new Date().toISOString().split('T')[0];
-      await saveRateSchedule({
+      const rateRes = await supabase.from('rate_schedules').insert({
         facility_id: newFacility.id,
         annual_rate_pct: initialApr,
         effective_date: today,
       });
+
+      if (rateRes.error) {
+        console.warn('[Supabase Insert Warning] rate_schedules:', rateRes.error.message);
+      }
     }
 
-    emitChange();
     await fetchSupabaseData();
     return { data: newFacility, error: null };
   } catch (err: any) {
-    console.error('Error saving facility:', err);
-    return { data: null, error: err?.message || 'Failed to save facility' };
+    console.error('[Supabase Exception] saveFacility:', err);
+    return { data: null, error: err?.message || 'Failed to connect to Supabase' };
   }
 }
 
+/**
+ * Update facility parameters directly in Supabase
+ */
 export async function updateFacility(
   id: string,
   updates: Partial<Facility>
@@ -299,7 +257,7 @@ export async function updateFacility(
       .single();
 
     if (error) {
-      console.error('Failed to update facility in Supabase:', error.message);
+      console.error('[Supabase Update Error] facilities:', error.message);
       return { data: null, error: error.message };
     }
 
@@ -313,35 +271,38 @@ export async function updateFacility(
       created_at: data.created_at,
     };
 
-    cachedFacilities = cachedFacilities.map((f) => (f.id === id ? updated : f));
-    emitChange();
+    await fetchSupabaseData();
     return { data: updated, error: null };
   } catch (err: any) {
-    console.error('Error updating facility:', err);
+    console.error('[Supabase Exception] updateFacility:', err);
     return { data: null, error: err?.message || 'Failed to update facility' };
   }
 }
 
-export async function deleteFacility(id: string): Promise<{ success: boolean; error: string | null }> {
+/**
+ * Delete a facility directly from Supabase (foreign keys cascade to rates and snapshots)
+ */
+export async function deleteFacility(
+  id: string
+): Promise<{ success: boolean; error: string | null }> {
   try {
     const { error } = await supabase.from('facilities').delete().eq('id', id);
     if (error) {
-      console.error('Failed to delete facility in Supabase:', error.message);
+      console.error('[Supabase Delete Error] facilities:', error.message);
       return { success: false, error: error.message };
     }
 
-    cachedFacilities = cachedFacilities.filter((f) => f.id !== id);
-    cachedRateSchedules = cachedRateSchedules.filter((r) => r.facility_id !== id);
-    cachedSnapshots = cachedSnapshots.filter((s) => s.facility_id !== id);
-    emitChange();
+    await fetchSupabaseData();
     return { success: true, error: null };
   } catch (err: any) {
-    console.error('Error deleting facility:', err);
+    console.error('[Supabase Exception] deleteFacility:', err);
     return { success: false, error: err?.message || 'Failed to delete facility' };
   }
 }
 
-// Rate Schedule Operations with Supabase
+/**
+ * Save rate schedule directly to Supabase
+ */
 export async function saveRateSchedule(
   schedule: Omit<RateSchedule, 'id'>
 ): Promise<{ data: RateSchedule | null; error: string | null }> {
@@ -357,7 +318,7 @@ export async function saveRateSchedule(
       .single();
 
     if (error) {
-      console.error('Failed to save rate schedule in Supabase:', error.message);
+      console.error('[Supabase Insert Error] rate_schedules:', error.message);
       return { data: null, error: error.message };
     }
 
@@ -368,33 +329,38 @@ export async function saveRateSchedule(
       effective_date: data.effective_date,
     };
 
-    cachedRateSchedules = [newSchedule, ...cachedRateSchedules];
-    emitChange();
+    await fetchSupabaseData();
     return { data: newSchedule, error: null };
   } catch (err: any) {
-    console.error('Error saving rate schedule:', err);
-    return { data: null, error: err?.message || 'Failed to save rate schedule' };
+    console.error('[Supabase Exception] saveRateSchedule:', err);
+    return { data: null, error: err?.message || 'Failed to save rate revision' };
   }
 }
 
-export async function deleteRateSchedule(id: string): Promise<{ success: boolean; error: string | null }> {
+/**
+ * Delete rate schedule revision directly from Supabase
+ */
+export async function deleteRateSchedule(
+  id: string
+): Promise<{ success: boolean; error: string | null }> {
   try {
     const { error } = await supabase.from('rate_schedules').delete().eq('id', id);
     if (error) {
-      console.error('Failed to delete rate schedule in Supabase:', error.message);
+      console.error('[Supabase Delete Error] rate_schedules:', error.message);
       return { success: false, error: error.message };
     }
 
-    cachedRateSchedules = cachedRateSchedules.filter((r) => r.id !== id);
-    emitChange();
+    await fetchSupabaseData();
     return { success: true, error: null };
   } catch (err: any) {
-    console.error('Error deleting rate schedule:', err);
-    return { success: false, error: err?.message || 'Failed to delete rate schedule' };
+    console.error('[Supabase Exception] deleteRateSchedule:', err);
+    return { success: false, error: err?.message || 'Failed to delete rate revision' };
   }
 }
 
-// Balance Snapshot Operations with Supabase
+/**
+ * Save balance snapshot directly to Supabase
+ */
 export async function saveSnapshot(
   snapshot: Omit<BalanceSnapshot, 'id' | 'entry_timestamp'>
 ): Promise<{ data: BalanceSnapshot | null; error: string | null }> {
@@ -411,7 +377,7 @@ export async function saveSnapshot(
       .single();
 
     if (error) {
-      console.error('Failed to save balance snapshot in Supabase:', error.message);
+      console.error('[Supabase Insert Error] balance_snapshots:', error.message);
       return { data: null, error: error.message };
     }
 
@@ -424,55 +390,61 @@ export async function saveSnapshot(
       entry_timestamp: data.entry_timestamp || new Date().toISOString(),
     };
 
-    cachedSnapshots = [newSnapshot, ...cachedSnapshots];
-    emitChange();
+    await fetchSupabaseData();
     return { data: newSnapshot, error: null };
   } catch (err: any) {
-    console.error('Error saving balance snapshot:', err);
-    return { data: null, error: err?.message || 'Failed to save snapshot' };
+    console.error('[Supabase Exception] saveSnapshot:', err);
+    return { data: null, error: err?.message || 'Failed to log snapshot' };
   }
 }
 
-export async function deleteSnapshot(id: string): Promise<{ success: boolean; error: string | null }> {
+/**
+ * Delete balance snapshot directly from Supabase
+ */
+export async function deleteSnapshot(
+  id: string
+): Promise<{ success: boolean; error: string | null }> {
   try {
     const { error } = await supabase.from('balance_snapshots').delete().eq('id', id);
     if (error) {
-      console.error('Failed to delete balance snapshot in Supabase:', error.message);
+      console.error('[Supabase Delete Error] balance_snapshots:', error.message);
       return { success: false, error: error.message };
     }
 
-    cachedSnapshots = cachedSnapshots.filter((s) => s.id !== id);
-    emitChange();
+    await fetchSupabaseData();
     return { success: true, error: null };
   } catch (err: any) {
-    console.error('Error deleting balance snapshot:', err);
+    console.error('[Supabase Exception] deleteSnapshot:', err);
     return { success: false, error: err?.message || 'Failed to delete snapshot' };
   }
 }
 
-// Clean Slate & Sample Demo Loader with Supabase
+/**
+ * Reset portfolio by deleting all records in Supabase PostgreSQL
+ */
 export async function clearAllData(): Promise<{ success: boolean; error: string | null }> {
   try {
+    // Delete in order of dependencies (or cascade from facilities)
     await supabase.from('balance_snapshots').delete().neq('id', '00000000-0000-0000-0000-000000000000');
     await supabase.from('rate_schedules').delete().neq('id', '00000000-0000-0000-0000-000000000000');
     await supabase.from('facilities').delete().neq('id', '00000000-0000-0000-0000-000000000000');
 
-    cachedFacilities = [];
-    cachedRateSchedules = [];
-    cachedSnapshots = [];
-    emitChange();
+    await fetchSupabaseData();
     return { success: true, error: null };
   } catch (err: any) {
-    console.error('Error clearing data in Supabase:', err);
+    console.error('[Supabase Exception] clearAllData:', err);
     return { success: false, error: err?.message || 'Failed to clear data' };
   }
 }
 
+/**
+ * Load commercial demo portfolio directly into Supabase PostgreSQL
+ */
 export async function loadSampleCommercialData(): Promise<{ success: boolean; error: string | null }> {
   try {
     const today = new Date().toISOString().split('T')[0];
 
-    // 1. Insert Facilities
+    // 1. Insert Facilities into Supabase
     const { data: facs, error: facErr } = await supabase
       .from('facilities')
       .insert([
@@ -501,7 +473,7 @@ export async function loadSampleCommercialData(): Promise<{ success: boolean; er
       .select();
 
     if (facErr || !facs) {
-      console.error('Error inserting sample facilities in Supabase:', facErr?.message);
+      console.error('[Supabase Insert Error] demo facilities:', facErr?.message);
       return { success: false, error: facErr?.message || 'Failed to insert demo facilities' };
     }
 
@@ -509,7 +481,7 @@ export async function loadSampleCommercialData(): Promise<{ success: boolean; er
     const icici = facs.find((f: any) => f.bank_name === 'ICICI Bank');
     const sbi = facs.find((f: any) => f.bank_name === 'State Bank of India');
 
-    // 2. Insert Rates
+    // 2. Insert Rate Schedules into Supabase
     const ratesToInsert = [];
     if (hdfc) {
       ratesToInsert.push(
@@ -531,7 +503,7 @@ export async function loadSampleCommercialData(): Promise<{ success: boolean; er
       await supabase.from('rate_schedules').insert(ratesToInsert);
     }
 
-    // 3. Insert Snapshots
+    // 3. Insert Balance Snapshots into Supabase
     const snapshotsToInsert = [];
     if (hdfc) {
       snapshotsToInsert.push({
@@ -565,7 +537,7 @@ export async function loadSampleCommercialData(): Promise<{ success: boolean; er
     await fetchSupabaseData();
     return { success: true, error: null };
   } catch (err: any) {
-    console.error('Error loading sample data to Supabase:', err);
+    console.error('[Supabase Exception] loadSampleCommercialData:', err);
     return { success: false, error: err?.message || 'Failed to load sample data' };
   }
 }
