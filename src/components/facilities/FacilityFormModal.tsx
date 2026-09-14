@@ -34,7 +34,7 @@ interface FacilityFormModalProps {
       status: 'ACTIVE' | 'CLOSED';
     },
     initialApr?: number
-  ) => void;
+  ) => Promise<{ success: boolean; error?: string | null }> | void;
 }
 
 export const FacilityFormModal: React.FC<FacilityFormModalProps> = ({
@@ -51,6 +51,7 @@ export const FacilityFormModal: React.FC<FacilityFormModalProps> = ({
   const [initialApr, setInitialApr] = useState('');
   const [status, setStatus] = useState<'ACTIVE' | 'CLOSED'>('ACTIVE');
   const [error, setError] = useState<string | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   const isEditing = Boolean(facilityToEdit);
 
@@ -90,7 +91,7 @@ export const FacilityFormModal: React.FC<FacilityFormModalProps> = ({
     }
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
 
     if (!bankName.trim()) {
@@ -118,18 +119,33 @@ export const FacilityFormModal: React.FC<FacilityFormModalProps> = ({
       }
     }
 
-    onSave(
-      {
-        bank_name: bankName.trim(),
-        facility_name: facilityName.trim(),
-        facility_type: facilityType,
-        sanction_limit: limit,
-        status,
-      },
-      aprNum
-    );
+    setIsSubmitting(true);
+    setError(null);
 
-    onClose();
+    try {
+      const result = await onSave(
+        {
+          bank_name: bankName.trim(),
+          facility_name: facilityName.trim(),
+          facility_type: facilityType,
+          sanction_limit: limit,
+          status,
+        },
+        aprNum
+      );
+
+      if (result && !result.success) {
+        setError(result.error || 'Failed to save facility to Supabase database.');
+        setIsSubmitting(false);
+        return;
+      }
+
+      onClose();
+    } catch (err: any) {
+      setError(err?.message || 'Failed to connect to database.');
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   return (
@@ -299,6 +315,7 @@ export const FacilityFormModal: React.FC<FacilityFormModalProps> = ({
             <Button
               type="button"
               variant="outline"
+              disabled={isSubmitting}
               onClick={onClose}
               className="h-11 rounded-lg text-xs font-medium touch-target-48 border-slate-200"
             >
@@ -306,10 +323,20 @@ export const FacilityFormModal: React.FC<FacilityFormModalProps> = ({
             </Button>
             <Button
               type="submit"
+              disabled={isSubmitting}
               className="h-11 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs touch-target-48 shadow-md"
             >
-              <Save className="w-4 h-4 mr-1.5" />
-              {isEditing ? 'Save Changes' : 'Create Facility'}
+              {isSubmitting ? (
+                <>
+                  <div className="w-4 h-4 mr-2 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                  Saving to Cloud...
+                </>
+              ) : (
+                <>
+                  <Save className="w-4 h-4 mr-1.5" />
+                  {isEditing ? 'Save Changes' : 'Create Facility'}
+                </>
+              )}
             </Button>
           </DialogFooter>
         </form>

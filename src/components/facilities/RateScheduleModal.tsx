@@ -31,8 +31,12 @@ interface RateScheduleModalProps {
   onClose: () => void;
   facility: Facility | null;
   rateSchedules: RateSchedule[];
-  onAddRate: (schedule: { facility_id: string; annual_rate_pct: number; effective_date: string }) => void;
-  onDeleteRate: (id: string) => void;
+  onAddRate: (schedule: {
+    facility_id: string;
+    annual_rate_pct: number;
+    effective_date: string;
+  }) => Promise<{ success: boolean; error?: string | null }> | void;
+  onDeleteRate: (id: string) => Promise<{ success: boolean; error?: string | null }> | void;
 }
 
 export const RateScheduleModal: React.FC<RateScheduleModalProps> = ({
@@ -48,6 +52,7 @@ export const RateScheduleModal: React.FC<RateScheduleModalProps> = ({
   const [newRate, setNewRate] = useState<string>('');
   const [effectiveDate, setEffectiveDate] = useState<string>(todayStr);
   const [error, setError] = useState<string | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   if (!facility) return null;
 
@@ -61,7 +66,7 @@ export const RateScheduleModal: React.FC<RateScheduleModalProps> = ({
     rateSchedules
   );
 
-  const handleAddSubmit = (e: React.FormEvent) => {
+  const handleAddSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
 
@@ -76,14 +81,27 @@ export const RateScheduleModal: React.FC<RateScheduleModalProps> = ({
       return;
     }
 
-    onAddRate({
-      facility_id: facility.id,
-      annual_rate_pct: rateNum,
-      effective_date: effectiveDate,
-    });
+    setIsSubmitting(true);
+    try {
+      const res = await onAddRate({
+        facility_id: facility.id,
+        annual_rate_pct: rateNum,
+        effective_date: effectiveDate,
+      });
 
-    setNewRate('');
-    setEffectiveDate(todayStr);
+      if (res && !res.success) {
+        setError(res.error || 'Failed to save rate to database.');
+        setIsSubmitting(false);
+        return;
+      }
+
+      setNewRate('');
+      setEffectiveDate(todayStr);
+    } catch (err: any) {
+      setError(err?.message || 'Failed to save rate schedule.');
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   return (
@@ -184,10 +202,20 @@ export const RateScheduleModal: React.FC<RateScheduleModalProps> = ({
 
           <Button
             type="submit"
+            disabled={isSubmitting}
             className="w-full h-10 bg-emerald-700 hover:bg-emerald-600 text-white text-xs font-semibold rounded-lg touch-target-48 shadow-sm"
           >
-            <Plus className="w-4 h-4 mr-1" />
-            Append Rate Schedule
+            {isSubmitting ? (
+              <>
+                <div className="w-3.5 h-3.5 mr-1.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                Saving to Cloud...
+              </>
+            ) : (
+              <>
+                <Plus className="w-4 h-4 mr-1" />
+                Append Rate Schedule
+              </>
+            )}
           </Button>
         </form>
 

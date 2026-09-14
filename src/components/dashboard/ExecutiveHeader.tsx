@@ -2,7 +2,8 @@ import React from 'react';
 import { DebtLogo } from '@/components/brand/DebtLogo';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
-import { Calendar, Plus, RefreshCw, Sparkles, Building2 } from 'lucide-react';
+import { Calendar, Plus, RefreshCw, Sparkles, Building2, CloudCheck, AlertCircle } from 'lucide-react';
+import { getLastSyncError, getIsSyncing } from '@/lib/storage';
 
 interface ExecutiveHeaderProps {
   asOfDate: string;
@@ -12,6 +13,7 @@ interface ExecutiveHeaderProps {
   hasFacilities: boolean;
   onLoadSampleData: () => void;
   onClearData: () => void;
+  onManualSync?: () => void;
 }
 
 export const ExecutiveHeader: React.FC<ExecutiveHeaderProps> = ({
@@ -22,7 +24,10 @@ export const ExecutiveHeader: React.FC<ExecutiveHeaderProps> = ({
   hasFacilities,
   onLoadSampleData,
   onClearData,
+  onManualSync,
 }) => {
+  const syncError = getLastSyncError();
+  const isSyncing = getIsSyncing();
   const formattedDisplayDate = new Date(asOfDate + 'T00:00:00').toLocaleDateString('en-IN', {
     weekday: 'short',
     day: 'numeric',
@@ -74,6 +79,24 @@ export const ExecutiveHeader: React.FC<ExecutiveHeaderProps> = ({
 
           {/* Date Selector & Global Controls */}
           <div className="flex items-center justify-between sm:justify-end gap-2 text-xs flex-wrap">
+            {/* Cloud Sync Status Indicator */}
+            <button
+              type="button"
+              onClick={onManualSync}
+              title={syncError ? `Sync issue: ${syncError} (click to retry)` : 'Connected to Supabase (click to re-sync)'}
+              className={`flex items-center gap-1.5 px-2 py-1.5 rounded-lg border transition-all text-[11px] font-medium touch-target-48 sm:h-auto ${
+                syncError
+                  ? 'bg-rose-950/60 border-rose-500/40 text-rose-300'
+                  : 'bg-emerald-950/40 border-emerald-500/30 text-emerald-400'
+              }`}
+            >
+              <span className={`w-2 h-2 rounded-full ${syncError ? 'bg-rose-500 animate-ping' : isSyncing ? 'bg-amber-400 animate-spin' : 'bg-emerald-400'}`} />
+              <span className="hidden xs:inline">
+                {syncError ? 'Sync Error' : isSyncing ? 'Syncing...' : 'Cloud Live'}
+              </span>
+              <RefreshCw className={`w-3 h-3 ${isSyncing ? 'animate-spin' : ''}`} />
+            </button>
+
             {/* Value Date Indicator / Selector */}
             <div className="flex items-center gap-1.5 bg-slate-800/80 border border-slate-700/80 px-2.5 py-1.5 rounded-lg shadow-inner">
               <Calendar className="w-3.5 h-3.5 text-emerald-400 shrink-0" />

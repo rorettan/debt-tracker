@@ -39,7 +39,7 @@ interface BalanceLogModalProps {
     value_date: string;
     balance_amount: number;
     notes?: string;
-  }) => void;
+  }) => Promise<{ success: boolean; error?: string | null }> | void;
 }
 
 export const BalanceLogModal: React.FC<BalanceLogModalProps> = ({
@@ -60,6 +60,7 @@ export const BalanceLogModal: React.FC<BalanceLogModalProps> = ({
   const [formattedDisplay, setFormattedDisplay] = useState<string>('');
   const [notes, setNotes] = useState<string>('');
   const [error, setError] = useState<string | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   // Set initial selected facility
   useEffect(() => {
@@ -106,7 +107,7 @@ export const BalanceLogModal: React.FC<BalanceLogModalProps> = ({
     }
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
 
     if (!facilityId) {
@@ -130,14 +131,29 @@ export const BalanceLogModal: React.FC<BalanceLogModalProps> = ({
       return;
     }
 
-    onSave({
-      facility_id: facilityId,
-      value_date: valueDate,
-      balance_amount: amount,
-      notes: notes.trim() || undefined,
-    });
+    setIsSubmitting(true);
+    setError(null);
 
-    onClose();
+    try {
+      const result = await onSave({
+        facility_id: facilityId,
+        value_date: valueDate,
+        balance_amount: amount,
+        notes: notes.trim() || undefined,
+      });
+
+      if (result && !result.success) {
+        setError(result.error || 'Failed to save snapshot to Supabase database.');
+        setIsSubmitting(false);
+        return;
+      }
+
+      onClose();
+    } catch (err: any) {
+      setError(err?.message || 'Failed to save snapshot to database.');
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   return (
@@ -297,6 +313,7 @@ export const BalanceLogModal: React.FC<BalanceLogModalProps> = ({
             <Button
               type="button"
               variant="outline"
+              disabled={isSubmitting}
               onClick={onClose}
               className="h-11 rounded-lg text-xs font-medium touch-target-48 border-slate-200"
             >
@@ -304,11 +321,20 @@ export const BalanceLogModal: React.FC<BalanceLogModalProps> = ({
             </Button>
             <Button
               type="submit"
-              disabled={activeFacilities.length === 0}
+              disabled={activeFacilities.length === 0 || isSubmitting}
               className="h-11 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs touch-target-48 shadow-md"
             >
-              <CheckCircle className="w-4 h-4 mr-1.5" />
-              Save Snapshot
+              {isSubmitting ? (
+                <>
+                  <div className="w-4 h-4 mr-2 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                  Logging to Cloud...
+                </>
+              ) : (
+                <>
+                  <CheckCircle className="w-4 h-4 mr-1.5" />
+                  Save Snapshot
+                </>
+              )}
             </Button>
           </DialogFooter>
         </form>

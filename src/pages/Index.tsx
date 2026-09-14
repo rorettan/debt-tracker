@@ -14,6 +14,7 @@ import { PaydownSimulator } from '@/components/tools/PaydownSimulator';
 import { EmptyStateIllustration } from '@/components/brand/EmptyStateIllustration';
 import { Facility } from '@/types/debt';
 import { Button } from '@/components/ui/button';
+import { toast } from 'sonner';
 import {
   LayoutDashboard,
   Building2,
@@ -110,8 +111,28 @@ export default function IndexPage() {
         onOpenQuickLog={() => handleOpenQuickLog()}
         onOpenAddFacility={handleOpenAddFacility}
         hasFacilities={hasFacilities}
-        onLoadSampleData={actions.loadSampleCommercialData}
-        onClearData={actions.clearAllData}
+        onLoadSampleData={async () => {
+          const res = await actions.loadSampleCommercialData();
+          if (res?.success) {
+            toast.success('Demo commercial portfolio loaded to Supabase');
+          } else {
+            toast.error(res?.error || 'Failed to load demo data');
+          }
+        }}
+        onClearData={async () => {
+          const res = await actions.clearAllData();
+          if (res?.success) {
+            toast.success('All portfolio data cleared from Supabase');
+          }
+        }}
+        onManualSync={async () => {
+          const res = await actions.refreshData();
+          if (res.error) {
+            toast.error(`Sync error: ${res.error}`);
+          } else {
+            toast.success('Live sync complete with Supabase');
+          }
+        }}
       />
 
       {/* Primary Navigation Tabs */}
@@ -283,12 +304,23 @@ export default function IndexPage() {
                 onOpenCreateFacility={handleOpenAddFacility}
                 onEditFacility={handleEditFacility}
                 onOpenRateSchedule={handleOpenRateSchedule}
-                onToggleFacilityStatus={(id, curStatus) => {
-                  actions.updateFacility(id, {
-                    status: curStatus === 'ACTIVE' ? 'CLOSED' : 'ACTIVE',
-                  });
+                onToggleFacilityStatus={async (id, curStatus) => {
+                  const newStatus = curStatus === 'ACTIVE' ? 'CLOSED' : 'ACTIVE';
+                  const res = await actions.updateFacility(id, { status: newStatus });
+                  if (res?.error) {
+                    toast.error(`Failed to update status: ${res.error}`);
+                  } else {
+                    toast.success(newStatus === 'ACTIVE' ? 'Facility reopened' : 'Facility archived');
+                  }
                 }}
-                onDeleteFacility={actions.deleteFacility}
+                onDeleteFacility={async (id) => {
+                  const res = await actions.deleteFacility(id);
+                  if (res?.error) {
+                    toast.error(`Failed to delete facility: ${res.error}`);
+                  } else {
+                    toast.success('Facility removed from Supabase');
+                  }
+                }}
               />
             )}
 
@@ -435,8 +467,14 @@ export default function IndexPage() {
         facilities={activeFacilities}
         rateSchedules={rateSchedules}
         initialFacilityId={selectedFacilityForLog}
-        onSave={(snapshotData) => {
-          actions.saveSnapshot(snapshotData);
+        onSave={async (snapshotData) => {
+          const res = await actions.saveSnapshot(snapshotData);
+          if (res.error) {
+            toast.error(`Database error: ${res.error}`);
+            return { success: false, error: res.error };
+          }
+          toast.success('Balance snapshot saved to Supabase');
+          return { success: true };
         }}
       />
 
@@ -445,11 +483,23 @@ export default function IndexPage() {
         isOpen={isFacilityModalOpen}
         onClose={() => setIsFacilityModalOpen(false)}
         facilityToEdit={facilityToEdit}
-        onSave={(facilityData, initialApr) => {
+        onSave={async (facilityData, initialApr) => {
           if (facilityToEdit) {
-            actions.updateFacility(facilityToEdit.id, facilityData);
+            const res = await actions.updateFacility(facilityToEdit.id, facilityData);
+            if (res.error) {
+              toast.error(`Database error: ${res.error}`);
+              return { success: false, error: res.error };
+            }
+            toast.success('Facility updated in Supabase');
+            return { success: true };
           } else {
-            actions.saveFacility(facilityData, initialApr);
+            const res = await actions.saveFacility(facilityData, initialApr);
+            if (res.error) {
+              toast.error(`Database error: ${res.error}`);
+              return { success: false, error: res.error };
+            }
+            toast.success('New facility created in Supabase');
+            return { success: true };
           }
         }}
       />
@@ -460,8 +510,24 @@ export default function IndexPage() {
         onClose={() => setIsRateModalOpen(false)}
         facility={facilityForRates}
         rateSchedules={rateSchedules}
-        onAddRate={(rateData) => actions.saveRateSchedule(rateData)}
-        onDeleteRate={(id) => actions.deleteRateSchedule(id)}
+        onAddRate={async (rateData) => {
+          const res = await actions.saveRateSchedule(rateData);
+          if (res.error) {
+            toast.error(`Failed to add rate: ${res.error}`);
+            return { success: false, error: res.error };
+          }
+          toast.success('Rate revision added to Supabase');
+          return { success: true };
+        }}
+        onDeleteRate={async (id) => {
+          const res = await actions.deleteRateSchedule(id);
+          if (res.error) {
+            toast.error(`Failed to delete rate: ${res.error}`);
+            return { success: false, error: res.error };
+          }
+          toast.success('Rate revision deleted');
+          return { success: true };
+        }}
       />
 
       {/* 4. Snapshot History Modal (Per-Facility drill-down) */}
@@ -471,7 +537,14 @@ export default function IndexPage() {
         facilityId={facilityForHistory}
         facilities={facilities}
         snapshots={snapshots}
-        onDeleteSnapshot={(id) => actions.deleteSnapshot(id)}
+        onDeleteSnapshot={async (id) => {
+          const res = await actions.deleteSnapshot(id);
+          if (res.error) {
+            toast.error(`Failed to delete snapshot: ${res.error}`);
+          } else {
+            toast.success('Snapshot deleted from Supabase');
+          }
+        }}
       />
     </div>
   );
